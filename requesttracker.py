@@ -1,5 +1,7 @@
 import re
-import rt
+import requests
+from requests_kerberos import HTTPKerberosAuth
+
 from itertools import chain
 from errbot.utils import ValidationException
 from errbot import BotPlugin, botcmd, re_botcmd
@@ -15,7 +17,7 @@ class RT(BotPlugin):
     """Request Tracker plugin for Err"""
 
     tracker = None
-    re_find_ticket = r'(^| |(https?\:\/\/.+=))(\d{1,})( |\?|\.|,|:|\!|$)'
+    re_find_ticket = r'(^| |(https?\:\/\/.+=)|rt)#?(\d{1,})( |\?|\.|,|:|\!|$)'
 
     def get_configuration_template(self):
         return CONFIG_TEMPLATE
@@ -31,30 +33,21 @@ class RT(BotPlugin):
 
     def check_configuration(self, config):
 
-        rt_login = False
+        self.tracker = False
 
         for key in ['REST_URL', 'DISPLAY_URL', 'USER', 'PASSWORD']:
 
             if key not in config:
                 raise ValidationException("missing config value: " + key)
 
-        try:
-            tracker = rt.Rt('%s/REST/1.0/' % config['REST_URL'])
-            rt_login = tracker.login(config['USER'], config['PASSWORD'])
-
-        except Exception as error:
-            raise ValidationException("Cannot connect to RT as %s: %s." % (
-                config['USER'], format(error),
-            ))
-
-        if rt_login is False:
-            raise ValidationException("Authentication failed")
-
     @re_botcmd(pattern=re_find_ticket, prefixed=False, flags=re.IGNORECASE)
     def find_ticket(self, message, match):
         """ Look up ticket metadata (works without prefix). Example: 12345 """
         url = match.group(2)
         ticket = match.group(3)
+        self.log.debug("Match: {}".format(match))
+        self.log.debug("URL: {}".format(url))
+        self.log.debug("Ticket: {}".format(ticket))
 
         if url and url != self.config['DISPLAY_URL']:
             return
@@ -64,18 +57,23 @@ class RT(BotPlugin):
 
     def ticket_summary(self, ticket_id):
 
-        self.tracker = rt.Rt(self.config['REST_URL'])
-        self.tracker.login(self.config['USER'], self.config['PASSWORD'])
-
         try:
-            ticket = self.tracker.get_ticket(ticket_id)
-
-            return "[%s](%s) in %s from %s" % (
-                format(ticket.get("Subject", "No subject")),
-                format(self.config['DISPLAY_URL'] + ticket_id),
-                format(ticket.get("Queue")),
-                format(', '.join(ticket.get("Requestors")))
-            )
-
+            response = requests.get("".join([self.config['REST_URL'], 'ticket/', ticket_id]),auth=HTTPKerberosAuth())
+            self.log.debug(response)
+            subject = 'No subject'
+            owner = 'Nobody'
+            queue = 'unknown'
+            requestors = 'Nobody'
+            url = "".join([self.config['DISPLAY_URL'], ticket_id])
+            if response.status_code == 200:
+                    for line in response.text.split('\n'):
+                      if   line.startswith("Owner:"):   owner = line.split(":")[1].rstrip()
+                      elif line.startswith("Subject:"): subject = line.split(":")[1].rstrip()
+                      elif line.startswith("Queue:"):   queue = line.split(":")[1].rstrip()
+                      elif line.startswith("Requestors:"): requestors = line.split(":")[1].rstrip()
+                      else: next
+                    return "[{}]({}) - {} - {}".format(subject, url, queue, requestors)
+            else:
+                    return "Hmm..."
         except:
             return "Sorry, that ticket does not exist or I cannot access it."
